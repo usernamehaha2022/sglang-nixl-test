@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import concurrent.futures
 import dataclasses
 import logging
-import os
 import struct
 import threading
 import time
@@ -206,29 +204,13 @@ class NixlKVManager(CommonKVManager):
         self.register_buffer_to_engine()
 
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            cpu_count = os.cpu_count() or 1
-            transfer_thread_pool_size = (
-                envs.SGLANG_DISAGGREGATION_THREAD_POOL_SIZE.get()
-            )
-            if transfer_thread_pool_size is None:
-                transfer_thread_pool_size = min(max(4, int(0.5 * cpu_count) // 8), 12)
             transfer_queue_size = envs.SGLANG_DISAGGREGATION_QUEUE_SIZE.get()
             self.transfer_queues: List[FastQueue] = [
                 FastQueue() for _ in range(transfer_queue_size)
             ]
-            assert transfer_thread_pool_size >= transfer_queue_size, (
-                f"The environment variable SGLANG_DISAGGREGATION_THREAD_POOL_SIZE={transfer_thread_pool_size} must be "
-                f"greater than or equal to SGLANG_DISAGGREGATION_QUEUE_SIZE={transfer_queue_size}."
-            )
-            self.executors = [
-                concurrent.futures.ThreadPoolExecutor(
-                    max_workers=max(1, transfer_thread_pool_size // transfer_queue_size)
-                )
-                for _ in range(transfer_queue_size)
-            ]
-            for queue, executor in zip(self.transfer_queues, self.executors):
+            for queue in self.transfer_queues:
                 threading.Thread(
-                    target=self.transfer_worker, args=(queue, executor), daemon=True
+                    target=self.transfer_worker, args=(queue,), daemon=True
                 ).start()
             self._start_bootstrap_thread()
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
@@ -330,7 +312,7 @@ class NixlKVManager(CommonKVManager):
     def check_status(self, bootstrap_room: int):
         return self.request_status.get(bootstrap_room, KVPoll.Bootstrapping)
 
-    def transfer_worker(self, queue: FastQueue, executor: concurrent.futures.Executor):
+    def transfer_worker(self, queue: FastQueue):
         while True:
             kv_chunk: TransferKVChunk = queue.get()
             room = kv_chunk.room
