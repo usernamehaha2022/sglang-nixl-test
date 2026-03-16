@@ -571,7 +571,11 @@ class SchedulerDisaggregationPrefillMixin:
 
                 assert poll == KVPoll.Success or poll == KVPoll.Failed
 
-            if poll in [KVPoll.WaitingForInput, KVPoll.Transferring]:
+            if poll in [
+                KVPoll.Bootstrapping,
+                KVPoll.WaitingForInput,
+                KVPoll.Transferring,
+            ]:
                 undone_reqs.append(req)
             elif poll == KVPoll.Success:  # transfer done
                 release_kv_cache(req, self.tree_cache)  # unlock the tree
