@@ -21,7 +21,10 @@ from sglang.srt.disaggregation.common.conn import (
     CommonKVReceiver,
     CommonKVSender,
 )
-from sglang.srt.disaggregation.common.utils import FastQueue, group_concurrent_contiguous
+from sglang.srt.disaggregation.common.utils import (
+    FastQueue,
+    group_concurrent_contiguous,
+)
 from sglang.srt.disaggregation.utils import (
     DisaggregationMode,
     filter_kv_indices_for_cp_rank,
@@ -204,11 +207,11 @@ class NixlKVManager(CommonKVManager):
 
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             cpu_count = os.cpu_count() or 1
-            transfer_thread_pool_size = envs.SGLANG_DISAGGREGATION_THREAD_POOL_SIZE.get()
+            transfer_thread_pool_size = (
+                envs.SGLANG_DISAGGREGATION_THREAD_POOL_SIZE.get()
+            )
             if transfer_thread_pool_size is None:
-                transfer_thread_pool_size = min(
-                    max(4, int(0.5 * cpu_count) // 8), 12
-                )
+                transfer_thread_pool_size = min(max(4, int(0.5 * cpu_count) // 8), 12)
             transfer_queue_size = envs.SGLANG_DISAGGREGATION_QUEUE_SIZE.get()
             self.transfer_queues: List[FastQueue] = [
                 FastQueue() for _ in range(transfer_queue_size)
@@ -327,9 +330,7 @@ class NixlKVManager(CommonKVManager):
     def check_status(self, bootstrap_room: int):
         return self.request_status.get(bootstrap_room, KVPoll.Bootstrapping)
 
-    def transfer_worker(
-        self, queue: FastQueue, executor: concurrent.futures.Executor
-    ):
+    def transfer_worker(self, queue: FastQueue, executor: concurrent.futures.Executor):
         while True:
             kv_chunk: TransferKVChunk = queue.get()
             room = kv_chunk.room
@@ -367,9 +368,7 @@ class NixlKVManager(CommonKVManager):
                         req.agent_name
                     ].decode_tp_size
 
-                    if self.is_mla_backend or (
-                        decode_tp_size == self.attn_tp_size
-                    ):
+                    if self.is_mla_backend or (decode_tp_size == self.attn_tp_size):
                         kv_xfer_handle = self.send_kvcache(
                             req.agent_name,
                             kv_chunk.prefill_kv_indices,
@@ -426,9 +425,7 @@ class NixlKVManager(CommonKVManager):
                 while handles:
                     states = [self.agent.check_xfer_state(h) for h in handles]
                     if any(s == "ERR" for s in states):
-                        raise RuntimeError(
-                            f"NIXL transfer encountered ERR room={room}"
-                        )
+                        raise RuntimeError(f"NIXL transfer encountered ERR room={room}")
                     if all(s == "DONE" for s in states):
                         break
                     time.sleep(0.001)
