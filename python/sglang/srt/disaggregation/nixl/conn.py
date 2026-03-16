@@ -1026,10 +1026,8 @@ class NixlKVSender(CommonKVSender):
         return status
 
     def clear(self):
-        try:
-            self.kv_mgr.request_status.pop(self.bootstrap_room, None)
-        except Exception:
-            pass
+        if self.bootstrap_room in self.kv_mgr.request_status:
+            self.kv_mgr.request_status.pop(self.bootstrap_room)
 
     def failure_exception(self):
         raise RuntimeError("NIXL KVSender Exception")
