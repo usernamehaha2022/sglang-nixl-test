@@ -317,16 +317,10 @@ class NixlKVManager(CommonKVManager):
             kv_chunk: TransferKVChunk = queue.get()
             room = kv_chunk.room
             try:
-                if (
-                    room in self.request_status
-                    and self.check_status(room) == KVPoll.Failed
-                ):
+                if self.check_status(room) == KVPoll.Failed:
                     continue
 
-                if room not in self.transfer_infos:
-                    time.sleep(0.001)
-                    queue.put(kv_chunk)
-                    continue
+                assert room in self.transfer_infos
 
                 self.update_status(room, KVPoll.Transferring)
 
@@ -410,7 +404,7 @@ class NixlKVManager(CommonKVManager):
                         raise RuntimeError(f"NIXL transfer encountered ERR room={room}")
                     if all(s == "DONE" for s in states):
                         break
-                    time.sleep(0.001)
+                    time.sleep(0)
 
                 if kv_chunk.is_last:
                     if room in self.transfer_infos:
