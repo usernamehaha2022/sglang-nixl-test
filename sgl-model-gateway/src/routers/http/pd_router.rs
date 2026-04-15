@@ -577,14 +577,7 @@ impl PDRouter {
 
         // TTFT Optimization: For streaming requests without logprobs (the common case),
         // fire prefill in background and only await decode's response.
-        // This avoids TTFT latency caused by prefill's event-loop blocking delay
-        // propagating through tokio::join! to the client.
-        //
-        // Root cause: In the original code, tokio::join! waits for BOTH prefill and decode
-        // HTTP responses. Prefill's response is gated by process_disagg_prefill_inflight_queue,
-        // which can only run between forward computations (~270ms each). Under load, this
-        // delays prefill's response by up to one full forward duration, blocking the router
-        // from proxying decode's already-ready stream to the client.
+        // This avoids blocking the decode stream proxy on prefill's HTTP response latency.
         if context.is_stream && !context.return_logprob {
             // Send prefill request in background — don't block decode's stream on it
             let prefill_url_for_log = prefill.url().to_string();
@@ -711,16 +704,12 @@ impl PDRouter {
 
                     if context.is_stream {
                         // Streaming response with logprobs
-                        let prefill_logprobs = if context.return_logprob {
-                            prefill_body
-                                .as_ref()
-                                .and_then(|body| serde_json::from_slice::<Value>(body).ok())
-                                .and_then(|json| {
-                                    json.pointer("/meta_info/input_token_logprobs").cloned()
-                                })
-                        } else {
-                            None
-                        };
+                        let prefill_logprobs = prefill_body
+                            .as_ref()
+                            .and_then(|body| serde_json::from_slice::<Value>(body).ok())
+                            .and_then(|json| {
+                                json.pointer("/meta_info/input_token_logprobs").cloned()
+                            });
 
                         let response_headers =
                             header_utils::preserve_response_headers(res.headers());
