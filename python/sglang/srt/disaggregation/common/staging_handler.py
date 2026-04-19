@@ -165,11 +165,7 @@ class DecodeStagingHandler:
 
         ok = self._scatter_region(staging_offset, page_start, num_pages, decode_req)
         if ok:
-            event = torch.cuda.Event()
-            event.record(self.staging_allocator._scatter_stream)
-            if not hasattr(decode_req, "_chunk_events"):
-                decode_req._chunk_events = []
-            decode_req._chunk_events.append((event, alloc_id))
+            self._record_chunk_scatter_event(decode_req, alloc_id)
             chunk_infos[chunk_idx] = (-1, -1, 0, -1, 0)
         else:
             logger.warning(
@@ -190,6 +186,10 @@ class DecodeStagingHandler:
         Called from decode_thread.  Sets ``_scatter_event`` **before**
         ``_staging_last_scatter_submitted`` so the main thread sees the
         event when it checks the flag (CPython GIL guarantees ordering).
+
+        Also handles intermediate chunks that were never sent a CHUNK_READY
+        (e.g., when prefix cache causes the prefill to take the non-chunked
+        path while staging allocated multiple chunks).
         """
         decode_req = self._room_to_decode_req.get(room)
         if decode_req is None:
@@ -200,6 +200,13 @@ class DecodeStagingHandler:
                 room,
             )
             return False
+
+        # Scatter any intermediate chunks that were never submitted via
+        # CHUNK_READY.  This happens when prefix cache makes the prefill
+        # take the non-chunked path (extend_input_len <= chunked_prefill_size)
+        # while the staging side allocated >1 chunks based on total seq_len.
+        self._scatter_pending_intermediate_chunks(decode_req)
+
         alloc_id = self._submit_last_scatter(decode_req)
         if alloc_id >= 0:
             event = torch.cuda.Event()
@@ -310,6 +317,67 @@ class DecodeStagingHandler:
             )
 
         return True
+
+    def _record_chunk_scatter_event(
+        self, decode_req: "DecodeRequest", alloc_id: int
+    ) -> None:
+        """Record a CUDA event after scatter and attach it to *decode_req*.
+
+        The main thread later polls these events to know when the scatter
+        stream has finished so it can safely free the staging allocation.
+        """
+        event = torch.cuda.Event()
+        event.record(self.staging_allocator._scatter_stream)
+        if not hasattr(decode_req, "_chunk_events"):
+            decode_req._chunk_events = []
+        decode_req._chunk_events.append((event, alloc_id))
+
+    def _scatter_pending_intermediate_chunks(self, decode_req: "DecodeRequest") -> None:
+        """Scatter and record events for intermediate chunks that were never
+        submitted via CHUNK_READY.
+
+        This handles the case where the prefill took the non-chunked path
+        (e.g., due to prefix cache reducing extend_input_len below
+        chunked_prefill_size) while the decode-side staging allocated
+        multiple chunks based on the full sequence length.  Without this,
+        intermediate chunk allocations are never scattered or freed,
+        causing the staging ring buffer watermark to stall permanently.
+        """
+        receiver = decode_req.kv_receiver
+        chunk_infos = getattr(receiver, "chunk_staging_infos", [])
+        if len(chunk_infos) <= 1:
+            return  # Only one chunk (or none); nothing extra to scatter.
+
+        # Process all chunks except the last one (which is handled by
+        # _submit_last_scatter).
+        for chunk_idx in range(len(chunk_infos) - 1):
+            alloc_id, staging_offset, _, _, chunk_num_pages = chunk_infos[chunk_idx]
+            if staging_offset < 0 or alloc_id < 0:
+                # Already scattered (via CHUNK_READY) or invalid.
+                continue
+
+            # Compute the page_start for this chunk.  Chunks are laid out
+            # sequentially: chunk 0 starts at page 0, chunk 1 at
+            # chunk_0_pages, etc.  We reconstruct page_start from the
+            # cumulative sum of preceding chunk sizes.
+            page_start = sum(
+                chunk_infos[i][4] for i in range(chunk_idx)  # [4] = num_pages
+            )
+
+            ok = self._scatter_region(
+                staging_offset, page_start, chunk_num_pages, decode_req
+            )
+            if ok:
+                self._record_chunk_scatter_event(decode_req, alloc_id)
+                chunk_infos[chunk_idx] = (-1, -1, 0, -1, 0)
+            else:
+                logger.warning(
+                    "[STAGING] _scatter_pending_intermediate_chunks failed "
+                    "room=%s chunk_idx=%s tp_rank=%s",
+                    decode_req.req.bootstrap_room,
+                    chunk_idx,
+                    self.tp_rank,
+                )
 
     def _submit_last_scatter(self, decode_req: "DecodeRequest") -> int:
         """Submit scatter for the last chunk. Returns alloc_id >= 0, or -1."""
