@@ -166,7 +166,8 @@ class DecodeStagingHandler:
         ok = self._scatter_region(staging_offset, page_start, num_pages, decode_req)
         if ok:
             self._record_chunk_scatter_event(decode_req, alloc_id)
-            chunk_infos[chunk_idx] = (-1, -1, 0, -1, 0)
+            # Keep num_pages (index 4) so page_start accumulation stays correct.
+            chunk_infos[chunk_idx] = (-1, -1, 0, -1, num_pages)
         else:
             logger.warning(
                 "submit_chunk_scatter failed room=%s chunk_idx=%s tp_rank=%s",
@@ -349,35 +350,30 @@ class DecodeStagingHandler:
             return  # Only one chunk (or none); nothing extra to scatter.
 
         # Process all chunks except the last one (which is handled by
-        # _submit_last_scatter).
+        # _submit_last_scatter).  Use a running sum for page_start so the
+        # cost is O(N) instead of O(N^2), and we are immune to any
+        # earlier chunk having been marked as processed.
+        page_start = 0
         for chunk_idx in range(len(chunk_infos) - 1):
             alloc_id, staging_offset, _, _, chunk_num_pages = chunk_infos[chunk_idx]
-            if staging_offset < 0 or alloc_id < 0:
-                # Already scattered (via CHUNK_READY) or invalid.
-                continue
-
-            # Compute the page_start for this chunk.  Chunks are laid out
-            # sequentially: chunk 0 starts at page 0, chunk 1 at
-            # chunk_0_pages, etc.  We reconstruct page_start from the
-            # cumulative sum of preceding chunk sizes.
-            page_start = sum(
-                chunk_infos[i][4] for i in range(chunk_idx)  # [4] = num_pages
-            )
-
-            ok = self._scatter_region(
-                staging_offset, page_start, chunk_num_pages, decode_req
-            )
-            if ok:
-                self._record_chunk_scatter_event(decode_req, alloc_id)
-                chunk_infos[chunk_idx] = (-1, -1, 0, -1, 0)
-            else:
-                logger.warning(
-                    "[STAGING] _scatter_pending_intermediate_chunks failed "
-                    "room=%s chunk_idx=%s tp_rank=%s",
-                    decode_req.req.bootstrap_room,
-                    chunk_idx,
-                    self.tp_rank,
+            if staging_offset >= 0 and alloc_id >= 0:
+                # This chunk has not been scattered yet.
+                ok = self._scatter_region(
+                    staging_offset, page_start, chunk_num_pages, decode_req
                 )
+                if ok:
+                    self._record_chunk_scatter_event(decode_req, alloc_id)
+                    # Keep num_pages so page_start accumulation stays correct.
+                    chunk_infos[chunk_idx] = (-1, -1, 0, -1, chunk_num_pages)
+                else:
+                    logger.warning(
+                        "[STAGING] _scatter_pending_intermediate_chunks failed "
+                        "room=%s chunk_idx=%s tp_rank=%s",
+                        decode_req.req.bootstrap_room,
+                        chunk_idx,
+                        self.tp_rank,
+                    )
+            page_start += chunk_num_pages
 
     def _submit_last_scatter(self, decode_req: "DecodeRequest") -> int:
         """Submit scatter for the last chunk. Returns alloc_id >= 0, or -1."""
